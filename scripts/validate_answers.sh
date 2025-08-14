@@ -19,13 +19,13 @@ CURL_ES=(curl -sS --fail --connect-timeout 3 --max-time 12)
 # Helpers
 # =========================
 
-# Normaliza texto (remove acentos pt-BR mais comuns e baixa para minúsculas)
+# Normaliza (remove acentos PT-BR e baixa para minúsculas)
 normalize() {
   sed 'y/ÁÀÂÃÄáàâãäÉÊËÈéêëèÍÏÌÎíïìîÓÔÕÖÒóôõöòÚÜÙÛúüùûÇç/AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCc/' \
   | tr '[:upper:]' '[:lower:]'
 }
 
-# GET Kibana /_find (lista objetos de um tipo)
+# GET saved_objects/_find (lista objetos de um tipo)
 kbn_find() { # $1 type
   "${CURL_KBN[@]}" -G \
     --data-urlencode "type=$1" \
@@ -33,19 +33,32 @@ kbn_find() { # $1 type
     "$KBN/api/saved_objects/_find"
 }
 
-# Retorna linhas "id|||title" de um tipo
+# Tenta achar ID por busca EXATA do Kibana (case-sensitive/acento-sensitive)
+find_id_exact() { # $1 type, $2 title
+  local type="$1" title="$2" resp id
+  resp="$("${CURL_KBN[@]}" -G \
+           --data-urlencode "type=$type" \
+           --data-urlencode "per_page=1000" \
+           --data-urlencode "search=\"${title}\"" \
+           --data-urlencode "search_fields=title" \
+           "$KBN/api/saved_objects/_find" || true)"
+  id="$(echo "$resp" | tr -d '\n' | sed -n 's/.*"type":"'"$type"'","id":"\([^"]*\)".*/\1/p' | head -n1)"
+  echo "$id"
+}
+
+# Lista "id|||title" de um tipo (separador robusto p/ Git Bash)
 ids_and_titles() { # $1 type
   kbn_find "$1" | tr -d '\r' \
   | sed -n 's/.*"type":"'"$1"'","id":"\([^"]*\)".*"title":"\([^"]*\)".*/\1|||\2/p'
 }
 
-# Lista somente títulos de um tipo (para depuração)
+# Lista apenas títulos (para debug)
 titles_of() { # $1 type
   ids_and_titles "$1" | sed 's/^.*|||//'
 }
 
-# Encontra ID por título (case/acento-insensível)
-find_id_by_title_soft() { # $1 type, $2 expected title
+# Fallback: encontra ID comparando títulos com case/acento INsensível
+find_id_soft() { # $1 type, $2 expected title
   local type="$1" want="$2"
   local want_n; want_n="$(printf '%s' "$want" | normalize)"
   local line id title title_n
@@ -58,6 +71,14 @@ find_id_by_title_soft() { # $1 type, $2 expected title
     fi
   done < <(ids_and_titles "$type")
   return 1
+}
+
+# Encontra ID por título (1º tenta EXATO, depois SOFT)
+find_id_title() { # $1 type, $2 title
+  local id
+  id="$(find_id_exact "$1" "$2" || true)"
+  [ -n "$id" ] && { echo "$id"; return 0; }
+  find_id_soft "$1" "$2" || true
 }
 
 # Exporta 1 saved object (NDJSON de 1 linha)
@@ -85,7 +106,7 @@ else
   bad "Índice 'logs' não encontrado"
 fi
 
-# Data View 'logs' com @timestamp (usa saved object index-pattern)
+# Data View 'logs' com @timestamp (via index-pattern)
 if "${CURL_KBN[@]}" "$KBN/api/saved_objects/_find?type=index-pattern&per_page=1000" \
    | grep -F '"title":"logs"' | grep -Fq '"timeFieldName":"@timestamp"'; then
   ok "Data View 'logs' com @timestamp"
@@ -99,10 +120,10 @@ echo "🧪 Tarefas (validação por NOME — case/acento INsensível)"
 # =========================
 # T1 — Saved Search "T1"
 # =========================
-T1_ID="$(find_id_by_title_soft search 'T1' || true)"
+T1_ID="$(find_id_title search 'T1' || true)"
 if [ -n "$T1_ID" ]; then
   T1_JSON="$(export_one search "$T1_ID")"
-  # aceita KQL '>= 500' (escapes no NDJSON) OU DSL com "gte":500
+  # aceita KQL '>= 500' (escapado) OU DSL "gte":500
   if [ -n "$T1_JSON" ] && contains "$T1_JSON" 'service.name' \
      && ( contains "$T1_JSON" '"gte":500' || echo "$T1_JSON" | grep -Eiq 'status_code[[:space:]]*\\?>=\\?[[:space:]]*500' ); then
     ok "T1: Saved Search 'T1' com service.name e status_code >= 500"
@@ -111,29 +132,32 @@ if [ -n "$T1_ID" ]; then
   fi
 else
   bad "T1: Saved Search 'T1' não encontrado"
-  dim "Títulos (search):"; titles_of search | sed 's/^/   - /'
+  dim "Títulos (search):"
+  titles_of search | sed 's/^/   - /'
+  echo
 fi
 
 # =========================
 # T2 — Visual "Treino - CPU por Serviço"
 # =========================
 TITLE_T2="Treino - CPU por Serviço"
-V_CPU_ID="${V_CPU_ID:-$(find_id_by_title_soft lens "$TITLE_T2" || true)}"
-[ -z "$V_CPU_ID" ] && V_CPU_ID="$(find_id_by_title_soft visualization "$TITLE_T2" || true)"
+V_CPU_ID="${V_CPU_ID:-$(find_id_title lens "$TITLE_T2" || true)}"
+[ -z "$V_CPU_ID" ] && V_CPU_ID="$(find_id_title visualization "$TITLE_T2" || true)"
 if [ -n "$V_CPU_ID" ]; then
   ok "T2: '$TITLE_T2' encontrado"
 else
   bad "T2: '$TITLE_T2' não encontrado"
   dim "Títulos (lens/visualization):"
   { titles_of lens; titles_of visualization; } | sort -u | sed 's/^/   - /'
+  echo
 fi
 
 # =========================
 # T3 — Visual "Treino - Top 5 Hosts por Memória"
 # =========================
 TITLE_T3="Treino - Top 5 Hosts por Memória"
-V_MEM_ID="${V_MEM_ID:-$(find_id_by_title_soft lens "$TITLE_T3" || true)}"
-[ -z "$V_MEM_ID" ] && V_MEM_ID="$(find_id_by_title_soft visualization "$TITLE_T3" || true)"
+V_MEM_ID="${V_MEM_ID:-$(find_id_title lens "$TITLE_T3" || true)}"
+[ -z "$V_MEM_ID" ] && V_MEM_ID="$(find_id_title visualization "$TITLE_T3" || true)"
 if [ -n "$V_MEM_ID" ]; then
   ok "T3: '$TITLE_T3' encontrado"
 else
@@ -159,12 +183,14 @@ fi
 # T5 — Dashboard "Treino - Dashboard Consolidado"
 # =========================
 TITLE_T5="Treino - Dashboard Consolidado"
-DASH_ID="${DASH_ID:-$(find_id_by_title_soft dashboard "$TITLE_T5" || true)}"
+DASH_ID="${DASH_ID:-$(find_id_title dashboard "$TITLE_T5" || true)}"
 if [ -n "$DASH_ID" ]; then
   ok "T5: Dashboard '$TITLE_T5' encontrado"
 else
   bad "T5: Dashboard '$TITLE_T5' não encontrado"
-  dim "Títulos (dashboard):"; titles_of dashboard | sed 's/^/   - /'
+  dim "Títulos (dashboard):"
+  titles_of dashboard | sed 's/^/   - /'
+  echo
 fi
 
 # =========================
