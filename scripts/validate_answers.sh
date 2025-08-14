@@ -1,139 +1,155 @@
 #!/bin/bash
+set -euo pipefail
 
-set -e
+# ================= Config =================
+KBN="${KBN:-http://localhost:5601}"       # use KBN="http://localhost:5601/s/<space>" se não for o default
+ES="${ES:-http://localhost:9200}"
 
-KBN="http://localhost:5601"
-ES="http://localhost:9200"
-CURL_KBN="curl -s -H kbn-xsrf:true"
+PASS=0; FAIL=0
+green(){ printf "\033[32m✓ %s\033[0m\n" "$1"; PASS=$((PASS+1)); }
+red(){   printf "\033[31m✗ %s\033[0m\n" "$1"; FAIL=$((FAIL+1)); }
+gray(){  printf "\033[90m↪ %s\033[0m\n" "$1"; }
 
-ok()   { echo "✓ $1"; }
-bad()  { echo "✗ $1"; }
-info() { echo "↪ $1"; }
+CURL_KBN=(curl -sS --fail --connect-timeout 3 --max-time 12 -H kbn-xsrf:true)
+CURL_ES=(curl -sS --fail --connect-timeout 3 --max-time 12)
 
-# -------- Funções utilitárias --------
-urlencode() { python - <<'PY'
-import sys, urllib.parse
-print(urllib.parse.quote(sys.stdin.read().strip()))
-PY
+# ================= Helpers =================
+# GET /api/saved_objects/_find com URL-encode correto (funciona no Git Bash/Windows)
+kbn_find () { # $1 type, $2 search (já com aspas para "match exato"), $3 search_fields (ex: title)
+  "${CURL_KBN[@]}" -G \
+    --data-urlencode "type=$1" \
+    --data-urlencode "per_page=1000" \
+    --data-urlencode "search=$2" \
+    --data-urlencode "search_fields=$3" \
+    "$KBN/api/saved_objects/_find"
 }
 
+# Retorna o primeiro ID cujo título é EXATAMENTE $2
+find_id_by_title () { # $1 type, $2 exact title
+  local type="$1" title="$2"
+  kbn_find "$type" "\"$title\"" "title" \
+    | sed -n 's/.*"type":"'"$type"'","id":"\([^"]*\)","namespaces".*"title":"'"$title"'".*/\1/p' | head -n1
+}
+
+# Exporta 1 objeto (NDJSON de uma linha)
+export_one () { # $1 type, $2 id
+  "${CURL_KBN[@]}" "$KBN/api/saved_objects/_export" \
+    -H "Content-Type: application/json" \
+    -d "{\"objects\":[{\"type\":\"$1\",\"id\":\"$2\"}]}" || true
+}
+
+# Lista todos os títulos de um tipo (para debug)
 titles_of () { # $1 type
-  $CURL_KBN "$KBN/api/saved_objects/_find?type=$1&per_page=1000" \
+  "${CURL_KBN[@]}" -G --data-urlencode "type=$1" --data-urlencode "per_page=1000" "$KBN/api/saved_objects/_find" \
     | sed -n 's/.*"title":"\([^"]*\)".*/\1/p'
 }
 
-find_id_by_title () { # $1 type, $2 exact title
-  local type="$1" title="$2"
-  local q; q=$(printf '%s' "\"$title\"" | urlencode)
-  $CURL_KBN "$KBN/api/saved_objects/_find?type=$type&per_page=1000&search_fields=title&search=$q" \
-    | sed -n 's/.*"type":"'"$type"'","id":"\([^"]*\)".*/\1/p' | head -n1
-}
+contains () { echo "$1" | grep -Fq "$2"; }
 
-export_by_title () { # $1 exact title, $2 types coma "lens,visualization"
-  local title="$1" types="$2" t id
-  IFS=',' read -r -a arr <<< "$types"
-  for t in "${arr[@]}"; do
-    id=$(find_id_by_title "$t" "$title")
-    if [ -n "$id" ]; then
-      $CURL_KBN "$KBN/api/saved_objects/_export" \
-        -H "Content-Type: application/json" \
-        -d "{\"objects\":[{\"type\":\"$t\",\"id\":\"$id\"}]}" \
-      || true
-      return 0
-    fi
-  done
-  return 1
-}
+# ================= Sanidade =================
+if ! "${CURL_ES[@]}" "$ES/_cluster/health" >/dev/null; then red "Elasticsearch indisponível em $ES"; exit 1; fi
+if ! "${CURL_KBN[@]}" "$KBN/api/status"    >/dev/null; then red "Kibana indisponível em $KBN"; exit 1; fi
+green "ES/Kibana respondendo"
 
-exists_title () { # $1 type, $2 exact title
-  [ -n "$(find_id_by_title "$1" "$2")" ]
-}
-
-# -------- Validação --------
-echo "✓ ES/Kibana respondendo"
-curl -s "$ES" > /dev/null
-curl -s "$KBN" > /dev/null
-
-# Pré-requisitos
-if curl -s "$ES/logs" | grep -q '"acknowledged":true\|{"logs"'; then
-  ok "Índice 'logs' existe"
+# ================= Pré-requisitos =================
+if "${CURL_ES[@]}" "$ES/logs" | grep -q '"number_of_shards"'; then
+  green "Índice 'logs' existe"
 else
-  bad "Índice 'logs' não encontrado"
+  red "Índice 'logs' não encontrado"
 fi
 
-if $CURL_KBN "$KBN/api/data_views/data_view" | grep -q '"name":"logs"'; then
-  ok "Data View 'logs' com @timestamp"
+# Volta para a checagem robusta do Data View (index-pattern + timeFieldName)
+if "${CURL_KBN[@]}" "$KBN/api/saved_objects/_find?type=index-pattern&per_page=1000" \
+   | grep -F '"title":"logs"' | grep -Fq '"timeFieldName":"@timestamp"'; then
+  green "Data View 'logs' com @timestamp"
 else
-  bad "Data View 'logs' não encontrado ou sem @timestamp"
+  red "Data View 'logs' não encontrado ou sem @timestamp"
 fi
 
 echo "—"
 echo "🧪 Tarefas (validação por NOME exato)"
 
-# ========= T1 =========
-if exists_title search "T1"; then
-  T1_JSON=$(export_by_title "T1" "search" || true)
-  if [ -n "${T1_JSON:-}" ] && echo "$T1_JSON" | grep -Fq 'service.name' \
-     && ( echo "$T1_JSON" | grep -Fq '"gte":500' || echo "$T1_JSON" | grep -Eq 'status_code[[:space:]]*\\?>=\\?[[:space:]]*500' ); then
-    ok "T1: Saved Search 'T1' com service.name e status_code >= 500"
+# ================= T1 =================
+if [ -n "$(find_id_by_title search 'T1')" ]; then
+  T1_ID="$(find_id_by_title search 'T1')"
+  T1_JSON="$(export_one search "$T1_ID")"
+  # aceita KQL com '>= 500' ou DSL com "gte":500
+  if [ -n "$T1_JSON" ] && contains "$T1_JSON" 'service.name' \
+     && ( contains "$T1_JSON" '"gte":500' || echo "$T1_JSON" | grep -Eq 'status_code[[:space:]]*\\?>=\\?[[:space:]]*500' ); then
+    green "T1: Saved Search 'T1' com service.name e status_code >= 500"
   else
-    bad "T1: 'T1' encontrado, mas query não contém service.name + status_code>=500"
+    red "T1: 'T1' encontrado, mas query não contém service.name + status_code >= 500"
   fi
 else
-  bad "T1: Saved Search 'T1' não encontrado"
-  info "Títulos existentes (search):"; titles_of search | sed 's/^/   - /'
+  red "T1: Saved Search 'T1' não encontrado"
+  gray "Títulos (search):"; titles_of search | sed 's/^/   - /'
 fi
 
-# ========= T2 =========
-if exists_title lens "Treino - CPU por Serviço" || exists_title visualization "Treino - CPU por Serviço"; then
-  ok "T2: 'Treino - CPU por Serviço' encontrado"
+# ================= T2 =================
+TITLE_T2="Treino - CPU por Serviço"
+V_CPU_ID="$(find_id_by_title lens "$TITLE_T2")"
+[ -z "$V_CPU_ID" ] && V_CPU_ID="$(find_id_by_title visualization "$TITLE_T2")"
+if [ -n "$V_CPU_ID" ]; then
+  green "T2: '$TITLE_T2' encontrado"
 else
-  bad "T2: 'Treino - CPU por Serviço' não encontrado"
-  info "Títulos existentes (lens/visualization):"; titles_of lens | sed 's/^/   - /'; titles_of visualization | sed 's/^/   - /'
+  red "T2: '$TITLE_T2' não encontrado"
+  gray "Títulos (lens/visualization):"
+  { titles_of lens; titles_of visualization; } | sort -u | sed 's/^/   - /'
 fi
 
-# ========= T3 =========
-if exists_title lens "Treino - Top 5 Hosts por Memória" || exists_title visualization "Treino - Top 5 Hosts por Memória"; then
-  ok "T3: 'Treino - Top 5 Hosts por Memória' encontrado (título confere)"
+# ================= T3 =================
+TITLE_T3="Treino - Top 5 Hosts por Memória"
+V_MEM_ID="$(find_id_by_title lens "$TITLE_T3")"
+[ -z "$V_MEM_ID" ] && V_MEM_ID="$(find_id_by_title visualization "$TITLE_T3")"
+if [ -n "$V_MEM_ID" ]; then
+  green "T3: '$TITLE_T3' encontrado (título confere)"
 else
-  bad "T3: 'Treino - Top 5 Hosts por Memória' não encontrado"
+  red "T3: '$TITLE_T3' não encontrado"
 fi
 
-# ========= T4 =========
-if $CURL_KBN "$KBN/api/saved_objects/_find?type=map&per_page=1000" | grep -q 'geoip.location'; then
-  ok "T4: Mapa com geoip.location encontrado"
+# ================= T4 =================
+MAPS_JSON="$("${CURL_KBN[@]}" -G --data-urlencode "type=map" --data-urlencode "per_page=1000" "$KBN/api/saved_objects/_find" || true)"
+if echo "$MAPS_JSON" | grep -Fq 'geoip.location'; then
+  green "T4: Mapa com geoip.location encontrado"
 else
-  bad "T4: mapa/visual com geoip.location não encontrado"
+  red "T4: mapa/visual com geoip.location não encontrado"
 fi
 
-# ========= T5 =========
-if exists_title dashboard "Treino - Dashboard Consolidado"; then
-  ok "T5: Dashboard 'Treino - Dashboard Consolidado' encontrado"
+# ================= T5 =================
+TITLE_T5="Treino - Dashboard Consolidado"
+DASH_ID="$(find_id_by_title dashboard "$TITLE_T5")"
+if [ -n "$DASH_ID" ]; then
+  green "T5: Dashboard '$TITLE_T5' encontrado"
 else
-  bad "T5: Dashboard 'Treino - Dashboard Consolidado' não encontrado"
+  red "T5: Dashboard '$TITLE_T5' não encontrado"
+  gray "Títulos (dashboard):"; titles_of dashboard | sed 's/^/   - /'
 fi
 
-# ========= T6 =========
-if curl -s "$ES/_ml/anomaly_detectors" | grep -q 'memory_percent'; then
-  if curl -s "$ES/_ml/anomaly_detectors" | grep -q '"function":"mean".*"field_name":"memory_percent".*"bucket_span":"15m"'; then
-    ok "T6: Job ML confere com gabarito"
+# ================= T6 =================
+ML_JSON="$("${CURL_ES[@]}" "$ES/_ml/anomaly_detectors/treino_anomalia_memoria" || true)"
+if echo "$ML_JSON" | grep -q '"job_id":"treino_anomalia_memoria"'; then
+  if echo "$ML_JSON" | grep -q '"function":"mean"' \
+     && echo "$ML_JSON" | grep -q '"field_name":"memory_percent"' \
+     && echo "$ML_JSON" | grep -q '"bucket_span":"15m"'; then
+    green "T6: Job ML confere com gabarito (mean memory_percent, 15m)"
   else
-    bad "T6: Job ML existe mas difere do gabarito (Single Metric • mean(memory_percent) • 15m)"
+    red "T6: Job ML existe mas difere do gabarito (Single Metric • mean(memory_percent) • 15m)"
   fi
 else
-  bad "T6: Job ML não encontrado"
+  red "T6: Job ML 'treino_anomalia_memoria' não encontrado"
 fi
 
-# ========= T7 =========
-if curl -s "$ES/.alerts*" | grep -q 'rule'; then
-  ok "T7: Regra de alerta localizada"
+# ================= T7 =================
+RULES_JSON="$("${CURL_KBN[@]}" "$KBN/api/alerting/rules/_find?per_page=1000" || true)"
+if echo "$RULES_JSON" | grep -iq 'cpu_percent' && echo "$RULES_JSON" | grep -Eq '90[^0-9]*'; then
+  green "T7: Regra envolvendo cpu_percent > 90 localizada"
 else
-  info "T7: não localizei regra (pode depender de conector/licença)."
+  gray  "T7: não localizei regra (pode depender de conector/licença)"
 fi
 
-# ========= T8 =========
-if exists_title dashboard "Treino - Dashboard Consolidado"; then
-  ok "T8: Dashboard existe (export NDJSON é manual)"
-else
-  bad "T8: Dashboard não encontrado"
-fi
+# ================= T8 =================
+[ -n "$DASH_ID" ] && green "T8: Dashboard existe (export NDJSON é manual)"
+
+echo "—"
+echo "Resultados: $PASS OK / $FAIL Falhas"
+[ "$FAIL" -eq 0 ] && echo "✅ Tudo certo!" || echo "⚠️ Há itens pendentes acima."
