@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 echo "♻  Resetando ambiente (containers e volumes)..."
 docker compose down -v
 docker compose up -d
