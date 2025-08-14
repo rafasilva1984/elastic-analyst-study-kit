@@ -18,8 +18,12 @@ services:
     container_name: kibana-analyst-8-8
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      # Chave fixa de 32 caracteres para permitir criação de regras/alertas
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=e3f1a7c4b9d26e50a1c2d3e4f5a6b7c8
     ports:
       - "5601:5601"
+    depends_on:
+      - elasticsearch
     networks:
       - elastic
 
