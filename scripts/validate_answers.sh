@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ================= Config =================
-KBN="${KBN:-http://localhost:5601}"       # ex.: http://localhost:5601/s/default
+KBN="${KBN:-http://localhost:5601}"       # use KBN="http://localhost:5601/s/<space>" se não for o default
 ES="${ES:-http://localhost:9200}"
 
 PASS=0; FAIL=0
@@ -15,7 +15,7 @@ CURL_ES=(curl -sS --fail --connect-timeout 3 --max-time 12)
 
 # ================= Helpers =================
 
-# Normaliza: tira acentos comuns PT-BR e baixa para minúsculas (sem precisar python/jq)
+# Normaliza: remove acentos pt-BR mais comuns e baixa para minúsculas
 normalize() {
   sed 'y/ÁÀÂÃÄáàâãäÉÊËÈéêëèÍÏÌÎíïìîÓÔÕÖÒóôõöòÚÜÙÛúüùûÇç/AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCc/' \
   | tr '[:upper:]' '[:lower:]'
@@ -29,10 +29,10 @@ kbn_find() { # $1 type
     "$KBN/api/saved_objects/_find"
 }
 
-# Lista "id<TAB>title" de um tipo
+# Lista "id|||title" de um tipo (separador robusto p/ Git Bash)
 ids_and_titles() { # $1 type
   kbn_find "$1" | tr -d '\r' \
-  | sed -n 's/.*"type":"'"$1"'","id":"\([^"]*\)".*"title":"\([^"]*\)".*/\1\t\2/p'
+  | sed -n 's/.*"type":"'"$1"'","id":"\([^"]*\)".*"title":"\([^"]*\)".*/\1|||\2/p'
 }
 
 # Encontra ID pelo TÍTULO com tolerância (case/acentos)
@@ -40,10 +40,12 @@ find_id_soft() { # $1 type, $2 expected title
   local type="$1" want="$2"
   local want_n; want_n="$(printf '%s' "$want" | normalize)"
   local line id title title_n
-  while IFS=$'\t' read -r id title; do
+  while IFS= read -r line; do
+    id="${line%%|||*}"
+    title="${line#*|||}"
     title_n="$(printf '%s' "$title" | normalize)"
     if [ "$title_n" = "$want_n" ]; then
-      echo "$id"; return 0
+      printf '%s\n' "$id"; return 0
     fi
   done < <(ids_and_titles "$type")
   return 1
@@ -58,7 +60,7 @@ export_one () { # $1 type, $2 id
 
 # Lista apenas os títulos (para debug)
 titles_of () { # $1 type
-  ids_and_titles "$1" | cut -f2-
+  ids_and_titles "$1" | sed 's/^.*|||//'
 }
 
 contains () { echo "$1" | grep -Fq "$2"; }
@@ -112,7 +114,7 @@ else
   red "T2: '$TITLE_T2' não encontrado"
   gray "Títulos (lens/visualization):"
   { titles_of lens; titles_of visualization; } | sort -u | sed 's/^/   - /'
-fi`
+fi
 
 # ================= T3 =================
 TITLE_T3="Treino - Top 5 Hosts por Memória"
@@ -129,7 +131,7 @@ MAPS_JSON="$("${CURL_KBN[@]}" -G --data-urlencode "type=map" --data-urlencode "p
 if echo "$MAPS_JSON" | grep -Fq 'geoip.location'; then
   green "T4: Mapa com geoip.location encontrado"
 else
-  # também aceita Lens que mencione geoip.location
+  # também aceita qualquer Lens que mencione geoip.location
   LENS_JSON="$("${CURL_KBN[@]}" -G --data-urlencode "type=lens" --data-urlencode "per_page=1000" "$KBN/api/saved_objects/_find" || true)"
   if echo "$LENS_JSON" | grep -Fq 'geoip.location'; then
     green "T4: Visual Lens com geoip.location encontrada"
