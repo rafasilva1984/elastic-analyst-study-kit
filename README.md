@@ -1,48 +1,24 @@
-# Elastic Certified Analyst - Study Kit
+# Elastic Certified Analyst Study Kit — 8.8 (fiel ao exame)
 
-Este kit simula um ambiente prático para treinar para a certificação **Elastic Certified Analyst**.
+**Objetivo**: simular o ambiente do exame (Elastic 8.8) e validar rapidamente se você criou os itens pedidos.
 
-## 📂 Conteúdo
-- `docker-compose.yml` → Sobe Elasticsearch + Kibana (7.15.2)
-- `data/sample-logs.json` → Dataset realista com 10.000 documentos
-- `scripts/load-data.sh` → Script para ingestão de dados (com verificação e mapping)
-- `scripts/reset-env.sh` → Reset do ambiente com recarga dos dados
-- `scripts/tasks.md` → Lista de tarefas estilo exame
-- `scripts/exam-style-training.md` → Treino cronometrado de 2 horas
-- `scripts/exam-style-training-answers.md` → Gabarito do treino
-- `docs/quick-start.md` → Guia rápido para iniciar
-- `docs/kql-cheatsheet.md` → Guia rápido de queries KQL
-- `docs/ml-jobs-guide.md` → Guia rápido de Machine Learning
-- `docs/exam-checklist.md` → Checklist rápido para o dia do exame
-
-## 🚀 Como usar
-1. **Subir ambiente**:
+## Como usar
 ```bash
 docker compose up -d
-```
-
-2. **Carregar dados**:
-```bash
 ./scripts/load-data.sh
+./scripts/create-data-view.sh
+# Abra http://localhost:5601 e ajuste o Time picker para JUL/2025
+# Crie as visuais, dashboard e job ML com os nomes indicados abaixo
+./scripts/validate.sh
 ```
 
-3. **Acessar Kibana**:
-http://localhost:5601
+## Itens esperados pelo validador
+- Visualização: **Treino - CPU por Serviço** (média de `cpu_percent` por `service.name`)
+- Visualização: **Treino - Top 5 Hosts por Memória** (tabela top 5 `host.name` por média de `memory_percent`)
+- Visualização: **Treino - Erros HTTP por Serviço** (contagem com `status_code >= 400` por `service.name`)
+- Dashboard: **Treino - Dashboard Consolidado**
+- Job ML (job_id): **treino_anomalia_memoria** (Single metric em `memory_percent`, bucket `15m`)
 
-4. **Executar tarefas**:
-Siga `scripts/tasks.md` e pratique.
+> O validador checa EXISTÊNCIA/NOME e a presença do Job ML, não a configuração detalhada.
 
-## 🏁 Treino Cronometrado
-Veja `scripts/exam-style-training.md` para um treino de 2 horas simulando o exame real.
-
-## 📄 Gabarito do Treino
-Compare no arquivo `scripts/exam-style-training-answers.md`.
-
-## 🗒 Checklist Rápido
-Veja `docs/exam-checklist.md` para ter dicas rápidas de execução no dia do exame.
-
-### ℹ️ Dica de troubleshooting
-Se ver o erro `The bulk request must be terminated by a newline`, rode novamente `./scripts/load-data.sh` (o script garante a quebra de linha final e recria o índice com mapping adequado).
-
----
-💡 **Dica:** Treine navegando na documentação da Elastic para ganhar tempo no exame.
+Veja `docs/quick-start.md`, `docs/ml-guide.md` e `docs/kql-cheatsheet.md`.

@@ -1,21 +1,4 @@
-# KQL Cheat Sheet
-
-## Igualdade
-```
-status_code : 500
-```
-
-## Intervalo
-```
-status_code >= 500
-```
-
-## Lista de valores
-```
+# KQL Cheatsheet
+status_code >= 400
+service.name : "payment-service"
 host.name : ("server01" or "server02")
-```
-
-## Combinando condições
-```
-service.name : "api-gateway" and status_code >= 400
-```
