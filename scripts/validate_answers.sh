@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# ===== Config rápida =====
-KBN="${KBN:-http://localhost:5601}"   # Ex.: http://localhost:5601/s/meu-space
+# ================= Config =================
+# - Ajuste se usar outro Space: KBN="http://localhost:5601/s/meu-space"
+KBN="${KBN:-http://localhost:5601}"
 ES="${ES:-http://localhost:9200}"
 
 CURL_KBN='curl -sS --fail --connect-timeout 3 --max-time 12 -H kbn-xsrf:true'
@@ -12,12 +13,11 @@ PASS=0; FAIL=0
 ok(){ printf "\033[32m✓ %s\033[0m\n" "$1"; PASS=$((PASS+1)); }
 bad(){ printf "\033[31m✗ %s\033[0m\n" "$1"; FAIL=$((FAIL+1)); }
 info(){ printf "\033[90m↪ %s\033[0m\n" "$1"; }
-
 die(){ printf "\033[31m✗ %s\033[0m\n" "$1"; exit 1; }
 
-# ===== Helpers =====
+# ================ Helpers =================
 find_id_by_title () {
-  # $1 type, $2 title, returns first ID
+  # $1 type, $2 title -> retorna primeiro ID
   local type="$1" title="$2"
   $CURL_KBN "$KBN/api/saved_objects/_find?type=$type&per_page=1000" \
   | tr -d '\r' \
@@ -31,7 +31,7 @@ find_id_by_title () {
 }
 
 export_one () {
-  # export single SO: $1 type, $2 id
+  # exporta 1 Saved Object (retorna NDJSON)
   local type="$1" id="$2"
   $CURL_KBN "$KBN/api/saved_objects/_export" \
     -H "Content-Type: application/json" \
@@ -41,12 +41,12 @@ export_one () {
 
 contains () { echo "$1" | grep -Fq "$2"; }
 
-# ===== Sanidade =====
+# ================ Sanidade =================
 $CURL_ES "$ES/_cluster/health" >/dev/null || die "Elasticsearch indisponível em $ES"
 $CURL_KBN "$KBN/api/status"    >/dev/null || die "Kibana indisponível em $KBN"
 ok "ES/Kibana respondendo"
 
-# ===== Pré-requisitos =====
+# ================ Pré-reqs =================
 if $CURL_ES "$ES/logs" | grep -q '"number_of_shards"'; then
   ok "Índice 'logs' existe"
 else
@@ -63,15 +63,17 @@ fi
 echo "—"
 echo "🧪 Tarefas"
 
-# ===== T1: Saved Search 'T1' com service.name e status_code >= 500 =====
-T1_ID="$(find_id_by_title search 'T1' || true)"
+# ================ T1 =================
+# Saved Search 'T1' com service.name e status_code >= 500
+T1_ID="$($CURL_KBN "$KBN/api/saved_objects/_find?type=search&per_page=1000&search_fields=title&search=%22T1%22" \
+        | sed -n 's/.*"type":"search","id":"\([^"]*\)".*/\1/p' | head -n1)"
 if [ -n "$T1_ID" ]; then
   T1_JSON="$(export_one search "$T1_ID")"
   if contains "$T1_JSON" 'service.name' && \
      ( contains "$T1_JSON" '"gte":500' || echo "$T1_JSON" | grep -Eq 'status_code[[:space:]]*>=[[:space:]]*500' ); then
     ok "T1: Saved Search 'T1' com service.name e status_code >= 500"
   else
-    bad "T1: 'T1' encontrado, mas não detectei service.name e status_code>=500 na query"
+    bad "T1: 'T1' encontrado, mas não detectei service.name + status_code>=500"
   fi
 else
   # fallback: qualquer saved search/query com termos
@@ -85,32 +87,41 @@ else
   fi
 fi
 
-# ===== Localiza visuais (Lens ou Visualization) por título =====
-V_CPU_ID="$(find_id_by_title lens 'Treino - CPU por Serviço' || true)"
-[ -z "$V_CPU_ID" ] && V_CPU_ID="$(find_id_by_title visualization 'Treino - CPU por Serviço' || true)"
+# ========== Resolver IDs das visuais ==========
+# IDs podem ser passados por env para evitar ambiguidade
+V_CPU_ID="${V_CPU_ID:-}"
+V_MEM_ID="${V_MEM_ID:-}"
+V_ERR_ID="${V_ERR_ID:-}"
 
-V_MEM_ID="$(find_id_by_title lens 'Treino - Top 5 Hosts por Memória' || true)"
-[ -z "$V_MEM_ID" ] && V_MEM_ID="$(find_id_by_title visualization 'Treino - Top 5 Hosts por Memória' || true)"
+# Se não vier por env, resolve por título (Lens > Visualization)
+if [ -z "$V_CPU_ID" ]; then
+  V_CPU_ID="$(find_id_by_title lens 'Treino - CPU por Serviço' || true)"
+  [ -z "$V_CPU_ID" ] && V_CPU_ID="$(find_id_by_title visualization 'Treino - CPU por Serviço' || true)"
+fi
+if [ -z "$V_MEM_ID" ]; then
+  V_MEM_ID="$(find_id_by_title lens 'Treino - Top 5 Hosts por Memória' || true)"
+  [ -z "$V_MEM_ID" ] && V_MEM_ID="$(find_id_by_title visualization 'Treino - Top 5 Hosts por Memória' || true)"
+fi
+if [ -z "$V_ERR_ID" ]; then
+  V_ERR_ID="$(find_id_by_title lens 'Treino - Erros HTTP por Serviço' || true)"
+  [ -z "$V_ERR_ID" ] && V_ERR_ID="$(find_id_by_title visualization 'Treino - Erros HTTP por Serviço' || true)"
+fi
 
-V_ERR_ID="$(find_id_by_title lens 'Treino - Erros HTTP por Serviço' || true)"
-[ -z "$V_ERR_ID" ] && V_ERR_ID="$(find_id_by_title visualization 'Treino - Erros HTTP por Serviço' || true)"
-
-# ===== T2: CPU por Serviço =====
+# ================ T2 =================
 if [ -n "$V_CPU_ID" ]; then
   V2="$(export_one lens "$V_CPU_ID")"
   [ -z "$V2" ] && V2="$(export_one visualization "$V_CPU_ID")"
   if contains "$V2" "cpu_percent" && contains "$V2" "service.name"; then
     ok "T2: 'Treino - CPU por Serviço' usa cpu_percent por service.name"
   else
-    # passa se pelo menos a visual existir (evita falso negativo por formatos de Lens)
-    info "T2: visual encontrada, mas não consegui confirmar campos — aceitando"
+    info "T2: visual encontrada, mas não confirmei campos — aceitando"
     ok  "T2: visual existente"
   fi
 else
-  bad "T2: 'Treino - CPU por Serviço' não encontrada (verifique o título exato)"
+  bad "T2: 'Treino - CPU por Serviço' não encontrada (verifique o título/ID)"
 fi
 
-# ===== T3: Top 5 Hosts por Memória =====
+# ================ T3 =================
 if [ -n "$V_MEM_ID" ]; then
   V3="$(export_one lens "$V_MEM_ID")"
   [ -z "$V3" ] && V3="$(export_one visualization "$V_MEM_ID")"
@@ -121,20 +132,19 @@ if [ -n "$V_MEM_ID" ]; then
     ok  "T3: visual existente"
   fi
 else
-  bad "T3: 'Treino - Top 5 Hosts por Memória' não encontrada (verifique o título)"
+  bad "T3: 'Treino - Top 5 Hosts por Memória' não encontrada (verifique o título/ID)"
 fi
 
-# ===== T4: Mapa com geoip.location (qualquer visual que contenha o campo) =====
+# ================ T4 =================
 MAPS="$($CURL_KBN "$KBN/api/saved_objects/_find?type=map&per_page=1000" || true)"
 if contains "$MAPS" 'geoip.location'; then
   ok "T4: Mapa contendo geoip.location encontrado"
 else
-  # também aceite se alguma visual/lens referenciar geoip.location
   ANY_GEO="$( $CURL_KBN "$KBN/api/saved_objects/_find?type=lens&per_page=1000" | grep -F 'geoip.location' || true )"
   if [ -n "$ANY_GEO" ]; then ok "T4: Visual Lens com geoip.location encontrada"; else bad "T4: mapa/visual com geoip.location não encontrado"; fi
 fi
 
-# ===== T5: Dashboard que referencia as 3 visuais =====
+# ================ T5 =================
 DASH_ID="$(find_id_by_title dashboard 'Treino - Dashboard Consolidado' || true)"
 if [ -n "$DASH_ID" ]; then
   DASH="$(export_one dashboard "$DASH_ID")"
@@ -143,28 +153,27 @@ if [ -n "$DASH_ID" ]; then
   [ -n "$V_MEM_ID" ] && contains "$DASH" "\"id\":\"$V_MEM_ID\"" && refs_ok=$((refs_ok+1))
   [ -n "$V_ERR_ID" ] && contains "$DASH" "\"id\":\"$V_ERR_ID\"" && refs_ok=$((refs_ok+1))
   if [ "$refs_ok" -ge 2 ]; then
-    # aceita com 2+ referências corretas para evitar falso negativo caso 1 visual tenha outro ID
     ok "T5: Dashboard referencia as visuais (encontrei $refs_ok/3)"
   else
-    bad "T5: Dashboard não referencia as visuais esperadas (confira títulos e salve no dashboard)"
+    bad "T5: Dashboard não referencia as visuais esperadas (adicione-as e salve)"
   fi
 else
   bad "T5: Dashboard 'Treino - Dashboard Consolidado' não encontrado"
 fi
 
-# ===== T6: Job de ML =====
+# ================ T6 =================
 ML="$($CURL_ES "$ES/_ml/anomaly_detectors/treino_anomalia_memoria" || true)"
 if echo "$ML" | grep -q '"job_id":"treino_anomalia_memoria"'; then
   if echo "$ML" | grep -q '"function":"mean"' && echo "$ML" | grep -q '"field_name":"memory_percent"' && echo "$ML" | grep -q '"bucket_span":"15m"'; then
     ok "T6: Job ML correto (mean memory_percent, bucket 15m)"
   else
-    bad "T6: Job ML existe mas difere do gabarito (use Single Metric • mean(memory_percent) • 15m)"
+    bad "T6: Job ML existe mas difere do gabarito (Single Metric • mean(memory_percent) • 15m)"
   fi
 else
   bad "T6: Job ML 'treino_anomalia_memoria' não encontrado"
 fi
 
-# ===== T7: Regra de alerta (best-effort) =====
+# ================ T7 =================
 RULES="$($CURL_KBN "$KBN/api/alerting/rules/_find?per_page=1000" || true)"
 if echo "$RULES" | grep -iq 'cpu_percent' && echo "$RULES" | grep -Eq '90[^0-9]*'; then
   ok "T7: Regra envolvendo cpu_percent>90 localizada"
@@ -172,8 +181,8 @@ else
   info "T7: não localizei regra (pode depender de conector/licença)."
 fi
 
-# ===== T8: Export NDJSON é manual; passa se houver dashboard =====
-[ -n "$DASH_ID" ] && ok "T8: Dashboard existe (export é manual)"
+# ================ T8 =================
+[ -n "$DASH_ID" ] && ok "T8: Dashboard existe (export NDJSON é manual)"
 
 echo "—"
 TOTAL=$((PASS+FAIL))
